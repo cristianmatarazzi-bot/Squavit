@@ -285,6 +285,7 @@ function SqvDuplicates({rows,trash,onEdit,onChanged}){
 function sqvImportNorm(value){return String(value||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]/g,'');}
 function sqvImportPhones(value){return String(value||'').split(/[\/;,\n]/).map(sqvPhone).filter(Boolean);}
 function sqvImportCandidates(source,rows){
+ if(source.phoneOnly)return rows.filter(r=>r.id===source.targetId);
  const name=sqvImportNorm(source.nome+source.cognome),phone=sqvPhone(source.telefono),email=String(source.email||'').trim().toLowerCase();
  return rows.filter(r=>{
   const direct=sqvImportNorm((r.nome||'')+(r.cognome||'')),reverse=sqvImportNorm((r.cognome||'')+(r.nome||''));
@@ -292,8 +293,9 @@ function sqvImportCandidates(source,rows){
  });
 }
 function sqvImportSameName(source,row){const n=sqvImportNorm(source.nome+source.cognome);return [sqvImportNorm((row.nome||'')+(row.cognome||'')),sqvImportNorm((row.cognome||'')+(row.nome||''))].includes(n);}
-function sqvImportDefault(source,rows){const candidates=sqvImportCandidates(source,rows);return !candidates.length?'new':candidates.length===1&&!candidates[0]._sqvDeleted&&sqvImportSameName(source,candidates[0])?candidates[0].id:'';}
+function sqvImportDefault(source,rows){if(source.phoneOnly){const r=rows.find(r=>r.id===source.targetId);return r&&!r._sqvDeleted&&!source.review&&!String(r.telefono||"").trim()&&!String(r.telefono2||"").trim()&&sqvImportSameName(source,r)?r.id:"";}const candidates=sqvImportCandidates(source,rows);return !candidates.length?'new':candidates.length===1&&!candidates[0]._sqvDeleted&&sqvImportSameName(source,candidates[0])?candidates[0].id:'';}
 function sqvImportRecord(source,existing){
+ if(source.phoneOnly){if(!existing||existing.id!==source.targetId||existing._sqvDeleted)throw Error('Scheda destinataria non disponibile.');if(String(existing.telefono||'').trim()||String(existing.telefono2||'').trim())throw Error('Un telefono è già presente: nessun recapito sovrascritto. Ricarica il confronto.');return {...existing,telefono:source.telefono,telefono2:source.telefono2||'',note:[existing.note,source.note].filter(Boolean).join('\n\n')};}
  if(!existing)return {id:source.id,nome:source.nome,cognome:source.cognome,comune:source.comune,telefono:source.telefono,email:source.email,note:source.note,affidabilita:0,voti:'',gruppo:''};
  const next={...existing};
  for(const key of ['comune','telefono','email'])if(!String(next[key]||'').trim())next[key]=source[key];
@@ -301,11 +303,12 @@ function sqvImportRecord(source,existing){
  return next;
 }
 function sqvImportValidate(data){
- if(!data||data.format!=='squavit-contact-integration-v1'||!Array.isArray(data.contacts)||!data.contacts.length||data.contacts.length>1000)throw Error('Seleziona un file di integrazione Squavit valido.');
+ if(!data||!['squavit-contact-integration-v1','squavit-phone-integration-v1'].includes(data.format)||!Array.isArray(data.contacts)||!data.contacts.length||data.contacts.length>1000)throw Error('Seleziona un file di integrazione Squavit valido.');
  const ids=new Set();
  const contacts=data.contacts.map(r=>{
   if(!r||typeof r.id!=='string'||!/^sqv-import-[a-z0-9-]+$/.test(r.id)||ids.has(r.id))throw Error('Identificativi non validi o ripetuti nel file.');
   ids.add(r.id);const row={id:r.id};
+  if(data.format==='squavit-phone-integration-v1'){if(typeof r.targetId!=='string'||!r.targetId||typeof r.telefono2!=='string'||!/^\+?[0-9]{8,15}$/.test(r.telefono)||r.telefono2&&!/^\+?[0-9]{8,15}$/.test(r.telefono2))throw Error('Destinazione o numero non valido.');row.phoneOnly=true;row.targetId=r.targetId;row.review=!!r.review;row.telefono2=r.telefono2;}
   for(const key of ['nome','cognome','comune','telefono','email','note']){if(typeof r[key]!=='string'||r[key].length>12000)throw Error('Dati del contatto non validi.');row[key]=r[key].trim();}
   if(!row.nome&&!row.cognome)throw Error('Un nominativo è vuoto.');
   if(!row.note)throw Error('Manca il riferimento alla fonte.');
@@ -318,6 +321,7 @@ function sqvImportApply(current,plan){
  for(const item of plan){
   const {source,target,expected,candidateSnapshot}=item;
   if(!target)continue;
+  if(source.phoneOnly&&target!==source.targetId)throw Error('Questa integrazione può aggiornare solo la scheda indicata.');
   const id=target==='new'?source.id:target;
   if(targets.has(id))throw Error('Due nominativi sono assegnati alla stessa scheda. Verifica le scelte.');
   targets.add(id);
@@ -372,12 +376,12 @@ function SqvImport({rows,trash,onChanged}){
    E('div',{className:'sqv-import-list',style:{maxHeight:'580px',overflow:'auto'}},data.contacts.filter(r=>(!onlyReview||!choices[r.id])&&Ht(r.nome+' '+r.cognome+' '+r.comune).includes(Ht(query))).map(source=>{
     const candidates=sqvImportCandidates(source,snapshot),target=snapshot.find(r=>r.id===choices[source.id]);
     return E('div',{key:source.id,className:'sqv-group'},E('strong',null,source.nome+' '+source.cognome),
-     E('p',null,source.comune+' · '+(source.telefono||'Telefono non disponibile')+' · '+(source.email||'Email non disponibile')),
+     E('p',null,[source.comune,source.telefono,source.telefono2,source.email].filter(Boolean).join(' · ')),source.phoneOnly&&E('p',null,source.review?'Da verificare: confronta il nome originale nelle informazioni della fonte prima di selezionare la scheda.':'Corrispondenza nominale completa: verifica il recapito prima di confermare.'),
      E('details',null,E('summary',null,'Informazioni della fonte'),E('p',{style:{whiteSpace:'pre-wrap'}},source.note)),
      E('label',{style:{display:'block',marginTop:10}},'Operazione per '+source.nome+' '+source.cognome,
       E('select',{value:choices[source.id]||'',disabled:busy,onChange:e=>setChoices({...choices,[source.id]:e.target.value}),style:{display:'block',width:'100%',padding:9,marginTop:5}},
-       E('option',{value:''},'Non importare / scegli una scheda'),E('option',{value:'new'},candidates.length?'Crea nuova scheda (verificare i possibili doppioni)':'Crea nuova scheda'),
-       candidates.map(r=>E('option',{key:r.id,value:r.id,disabled:!!r._sqvDeleted},(r._sqvDeleted?'Nel cestino: ':'Completa: ')+r.nome+' '+r.cognome+' · '+r.comune+' · '+r.telefono+' · ID '+r.id)))),
+       E('option',{value:''},'Non importare / scegli una scheda'),!source.phoneOnly&&E('option',{value:'new'},candidates.length?'Crea nuova scheda (verificare i possibili doppioni)':'Crea nuova scheda'),
+       candidates.map(r=>E('option',{key:r.id,value:r.id,disabled:!!r._sqvDeleted||(source.phoneOnly&&!!(String(r.telefono||'').trim()||String(r.telefono2||'').trim()))},(r._sqvDeleted?'Nel cestino: ':'Completa: ')+r.nome+' '+r.cognome+' · '+r.comune+' · '+r.telefono+' · ID '+r.id)))),
      target&&E('p',null,'Scheda scelta: '+target.nome+' '+target.cognome+'. Comune: '+(target.comune||'vuoto')+'. Telefono: '+(target.telefono||'vuoto')+'. Email: '+(target.email||'vuota')+'. Saranno completati solo i campi vuoti e aggiunte le informazioni della fonte alle note.'),
      candidates.length>1&&E('p',null,candidates.length+' possibili corrispondenze: verifica la scheda scelta.'));
    })),
