@@ -448,20 +448,23 @@ async function sqvRecordContact(row){
 async function sqvContactReply(row,eventId,checked){
  return sqvAtomic(current=>{sqvCheck(current[row.id],row);const events=sqvContactEvents(current[row.id]);if(!events.some(e=>e.id===eventId))throw Error('Contatto non trovato. Riapri la scheda.');return {...current,[row.id]:{...current[row.id],contattiStorico:events.map(e=>e.id===eventId?{...e,risposta:!!checked,rispostaAggiornataIl:new Date().toISOString()}:e)}};});
 }
+async function sqvRemoveContact(row,eventId){
+ return sqvAtomic(current=>{sqvCheck(current[row.id],row);const events=sqvContactEvents(current[row.id]);if(!events.some(e=>e.id===eventId))throw Error('Registrazione non trovata. Riapri la scheda.');const remaining=events.filter(e=>e.id!==eventId),last=remaining[remaining.length-1];return {...current,[row.id]:{...current[row.id],contattiStorico:remaining,contattato:remaining.length>0,contattatoIl:last?.data||''}};});
+}
 function SqvContactCheck({row,onChanged}){
  const E=C.default.createElement,[busy,setBusy]=C.useState(''),[error,setError]=C.useState(''),[open,setOpen]=C.useState(false),lock=C.useRef(false);
  const events=sqvContactEvents(row),last=events[events.length-1];
  const run=async(action,fn)=>{if(lock.current)return;lock.current=true;setBusy(action);setError('');try{onChanged(await fn());}catch(e){setError(e.message||'Salvataggio non riuscito.');}finally{lock.current=false;setBusy('');}};
  const checkbox=(label,checked,disabled,change)=>E('label',{style:{display:'inline-flex',alignItems:'center',gap:5,fontSize:12,cursor:disabled?'default':'pointer'}},E('input',{type:'checkbox',checked,disabled,onChange:change,'aria-label':label+': '+row.nome+' '+row.cognome,style:{width:17,height:17,accentColor:'#187851',margin:0}}),label);
  return E('div',{style:{minWidth:180,maxWidth:330}},E('div',{style:{display:'flex',flexWrap:'wrap',gap:9}},
- checkbox('Contattato',!!last,!!busy||!!last,()=>run('new',()=>sqvRecordContact(row))),
+ checkbox('Contattato',!!last,!!busy,e=>{if(e.target.checked)run('new',()=>sqvRecordContact(row));else if(last&&(!events.length||events.length===1||window.confirm('Annullare l’ultima registrazione? Le '+(events.length-1)+' precedenti rimarranno nello storico e la casella resterà spuntata.')))run('remove',()=>sqvRemoveContact(row,last.id));}),
  checkbox('Nuovo contatto',busy==='new',!!busy||!last,e=>{if(e.target.checked)run('new',()=>sqvRecordContact(row));}),
  checkbox('Risposta ricevuta',last?.risposta===true,!!busy||!last,e=>{const checked=e.target.checked;run('reply',()=>sqvContactReply(row,last.id,checked));})),
  last&&E('small',{className:'sqv-last-contact'},'Ultimo: '+(last.data?sqvDateLabel(last.data):'data non disponibile')+(last.ora?' · '+last.ora:'')),
  last&&E('small',{className:'sqv-last-contact'},last.risposta===true?'Risposta ricevuta all’ultimo contatto':last.risposta===false?'Nessuna risposta all’ultimo contatto':'Risposta all’ultimo contatto non registrata'),
  busy&&E('small',{role:'status'},'Salvataggio…'),
  events.length>0&&E('button',{type:'button',className:'sqv-name-edit',onClick:()=>setOpen(!open),'aria-expanded':open,style:{fontSize:12,marginTop:5}},(open?'Nascondi':'Storico')+' ('+events.length+')'),
- open&&E('div',{style:{maxHeight:240,overflow:'auto',padding:8,background:'#f0f5fb',borderRadius:8,marginTop:5}},E('small',null,'Ogni nuovo contatto aggiunge una registrazione. La risposta si riferisce alla singola registrazione.'),events.slice().reverse().map(event=>E('div',{key:event.id,style:{padding:'8px 0',borderBottom:'1px solid #cbd9e9'}},E('div',null,event.data?sqvDateLabel(event.data):'Data non disponibile',event.ora?' · '+event.ora:''),checkbox('Risposta ricevuta',event.risposta===true,!!busy,e=>{const checked=e.target.checked;run('reply',()=>sqvContactReply(row,event.id,checked));}),E('small',{style:{display:'block'}},event.risposta===null?'Risposta non registrata':event.risposta?'Risposta ricevuta':'Nessuna risposta registrata')))),
+ open&&E('div',{style:{maxHeight:240,overflow:'auto',padding:8,background:'#f0f5fb',borderRadius:8,marginTop:5}},E('small',null,'Ogni nuovo contatto aggiunge una registrazione. La risposta si riferisce alla singola registrazione.'),events.slice().reverse().map(event=>E('div',{key:event.id,style:{padding:'8px 0',borderBottom:'1px solid #cbd9e9'}},E('div',null,event.data?sqvDateLabel(event.data):'Data non disponibile',event.ora?' · '+event.ora:''),checkbox('Risposta ricevuta',event.risposta===true,!!busy,e=>{const checked=e.target.checked;run('reply',()=>sqvContactReply(row,event.id,checked));}),E('small',{style:{display:'block'}},event.risposta===null?'Risposta non registrata':event.risposta?'Risposta ricevuta':'Nessuna risposta registrata'),E('button',{type:'button',className:'sqv-name-edit',disabled:!!busy,onClick:()=>{if(window.confirm('Eliminare questa registrazione di contatto e la relativa risposta?'))run('remove',()=>sqvRemoveContact(row,event.id));},style:{fontSize:12,color:'#a12525'}},'Elimina registrazione')))),
  error&&E('small',{role:'alert',style:{display:'block',color:'#a12525'}},error));
 }
 
