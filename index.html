@@ -408,7 +408,7 @@ function SqvTools({rows,trash,loaded,onEdit,onChanged,onView}) {
 
 function sqvToday(){const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
 function sqvHistory(row){return Array.isArray(row.attivita)?row.attivita.filter(a=>a&&typeof a==='object'):[];}
-function sqvLastContact(row){if(typeof row.contattato==='boolean')return row.contattato?(row.contattatoIl||''):'';return sqvHistory(row).filter(a=>['Contatto','Telefonata','Incontro','Messaggio','Email'].includes(a.tipo)&&/^\d{4}-\d{2}-\d{2}$/.test(a.data)).map(a=>a.data).sort().pop()||'';}
+function sqvLastContact(row){const events=sqvContactEvents(row);return events.length?events[events.length-1].data||'':'';}
 function sqvDateLabel(date){return date?date.slice(8,10)+'/'+date.slice(5,7)+'/'+date.slice(0,4):'Non registrato';}
 let sqvComuneIndex;function sqvComune(value){if(!sqvComuneIndex)sqvComuneIndex=new Map(D_.map(name=>[sqvImportNorm(name),name]));return sqvComuneIndex.get(sqvImportNorm(value))||'';}
 function sqvTerritory(rows){const groups={};for(const row of rows){const key=sqvComune(row.comune);if(key)(groups[key]||(groups[key]=[])).push(row);}return groups;}
@@ -433,15 +433,38 @@ function SqvDialog({title,onClose,busy,children}){
  const keys=e=>{if(e.key==='Escape'&&!busy){e.stopPropagation();onClose();}if(e.key==='Tab'){const nodes=[...ref.current.querySelectorAll('button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),a[href]')];if(!nodes.length)return;const first=nodes[0],last=nodes[nodes.length-1];if(e.shiftKey&&document.activeElement===first){e.preventDefault();last.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus();}}};
  return E('div',{className:'sqv-detail-overlay'},E('div',{className:'sqv-detail-dialog',role:'dialog','aria-modal':true,'aria-label':title,ref,onKeyDown:keys},E('div',{className:'sqv-detail-head'},E('h2',null,title),E('button',{type:'button',onClick:onClose,disabled:busy,'aria-label':'Chiudi scheda'},'×')),children));
 }
-function sqvIsContacted(row){return typeof row.contattato==='boolean'?row.contattato:!!sqvLastContact(row);}
-async function sqvSetContacted(row,checked){
- return sqvAtomic(current=>{sqvCheck(current[row.id],row);return {...current,[row.id]:{...current[row.id],contattato:!!checked,contattatoIl:checked?sqvToday():''}};});
+function sqvContactEvents(row){
+ if(Array.isArray(row.contattiStorico))return row.contattiStorico;
+ const old=sqvHistory(row).filter(a=>['Contatto','Telefonata','Incontro','Messaggio','Email'].includes(a.tipo)).map((a,i)=>({id:'legacy-'+(a.id||i),data:a.data||'',ora:'',risposta:null,origine:'storico precedente'}));
+ if(row.contattatoIl&&!old.some(a=>a.data===row.contattatoIl))old.push({id:'legacy-check',data:row.contattatoIl,ora:'',risposta:null,origine:'spunta precedente'});
+ if(row.contattato&&!old.length)old.push({id:'legacy-undated',data:'',ora:'',risposta:null,origine:'contatto precedente, data non disponibile'});
+ return old.sort((a,b)=>(a.data||'').localeCompare(b.data||''));
+}
+function sqvIsContacted(row){return sqvContactEvents(row).length>0;}
+async function sqvRecordContact(row){
+ const now=new Date(),entry={id:crypto.randomUUID(),data:sqvToday(),ora:now.toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'}),registratoIl:now.toISOString(),risposta:null};
+ return sqvAtomic(current=>{sqvCheck(current[row.id],row);return {...current,[row.id]:{...current[row.id],contattato:true,contattatoIl:entry.data,contattiStorico:[...sqvContactEvents(current[row.id]),entry]}};});
+}
+async function sqvContactReply(row,eventId,checked){
+ return sqvAtomic(current=>{sqvCheck(current[row.id],row);const events=sqvContactEvents(current[row.id]);if(!events.some(e=>e.id===eventId))throw Error('Contatto non trovato. Riapri la scheda.');return {...current,[row.id]:{...current[row.id],contattiStorico:events.map(e=>e.id===eventId?{...e,risposta:!!checked,rispostaAggiornataIl:new Date().toISOString()}:e)}};});
 }
 function SqvContactCheck({row,onChanged}){
- const E=C.default.createElement,[busy,setBusy]=C.useState(false),[error,setError]=C.useState(''),lock=C.useRef(false);
- const toggle=async checked=>{if(lock.current)return;lock.current=true;setBusy(true);setError('');try{onChanged(await sqvSetContacted(row,checked));}catch(e){setError(e.message||'Salvataggio non riuscito.');}finally{lock.current=false;setBusy(false);}};
- return E('div',null,E('label',{style:{display:'inline-flex',alignItems:'center',gap:7,cursor:'pointer'}},E('input',{type:'checkbox',checked:sqvIsContacted(row),disabled:busy,onChange:e=>toggle(e.target.checked),'aria-label':'Contattato: '+row.nome+' '+row.cognome,style:{width:19,height:19,accentColor:'#187851',margin:0}}),busy?'Salvataggio…':''),sqvIsContacted(row)&&sqvLastContact(row)&&E('small',{className:'sqv-last-contact'},sqvDateLabel(sqvLastContact(row))),error&&E('small',{role:'alert',style:{display:'block',color:'#a12525',maxWidth:220}},error));
+ const E=C.default.createElement,[busy,setBusy]=C.useState(''),[error,setError]=C.useState(''),[open,setOpen]=C.useState(false),lock=C.useRef(false);
+ const events=sqvContactEvents(row),last=events[events.length-1];
+ const run=async(action,fn)=>{if(lock.current)return;lock.current=true;setBusy(action);setError('');try{onChanged(await fn());}catch(e){setError(e.message||'Salvataggio non riuscito.');}finally{lock.current=false;setBusy('');}};
+ const checkbox=(label,checked,disabled,change)=>E('label',{style:{display:'inline-flex',alignItems:'center',gap:5,fontSize:12,cursor:disabled?'default':'pointer'}},E('input',{type:'checkbox',checked,disabled,onChange:change,'aria-label':label+': '+row.nome+' '+row.cognome,style:{width:17,height:17,accentColor:'#187851',margin:0}}),label);
+ return E('div',{style:{minWidth:180,maxWidth:330}},E('div',{style:{display:'flex',flexWrap:'wrap',gap:9}},
+ checkbox('Contattato',!!last,!!busy||!!last,()=>run('new',()=>sqvRecordContact(row))),
+ checkbox('Nuovo contatto',busy==='new',!!busy||!last,e=>{if(e.target.checked)run('new',()=>sqvRecordContact(row));}),
+ checkbox('Risposta ricevuta',last?.risposta===true,!!busy||!last,e=>{const checked=e.target.checked;run('reply',()=>sqvContactReply(row,last.id,checked));})),
+ last&&E('small',{className:'sqv-last-contact'},'Ultimo: '+(last.data?sqvDateLabel(last.data):'data non disponibile')+(last.ora?' · '+last.ora:'')),
+ last&&E('small',{className:'sqv-last-contact'},last.risposta===true?'Risposta ricevuta all’ultimo contatto':last.risposta===false?'Nessuna risposta all’ultimo contatto':'Risposta all’ultimo contatto non registrata'),
+ busy&&E('small',{role:'status'},'Salvataggio…'),
+ events.length>0&&E('button',{type:'button',className:'sqv-name-edit',onClick:()=>setOpen(!open),'aria-expanded':open,style:{fontSize:12,marginTop:5}},(open?'Nascondi':'Storico')+' ('+events.length+')'),
+ open&&E('div',{style:{maxHeight:240,overflow:'auto',padding:8,background:'#f0f5fb',borderRadius:8,marginTop:5}},E('small',null,'Ogni nuovo contatto aggiunge una registrazione. La risposta si riferisce alla singola registrazione.'),events.slice().reverse().map(event=>E('div',{key:event.id,style:{padding:'8px 0',borderBottom:'1px solid #cbd9e9'}},E('div',null,event.data?sqvDateLabel(event.data):'Data non disponibile',event.ora?' · '+event.ora:''),checkbox('Risposta ricevuta',event.risposta===true,!!busy,e=>{const checked=e.target.checked;run('reply',()=>sqvContactReply(row,event.id,checked));}),E('small',{style:{display:'block'}},event.risposta===null?'Risposta non registrata':event.risposta?'Risposta ricevuta':'Nessuna risposta registrata')))),
+ error&&E('small',{role:'alert',style:{display:'block',color:'#a12525'}},error));
 }
+
 function SqvContactCard({row,onClose,onEdit,onChanged}){
  const E=C.default.createElement;
  return E(SqvDialog,{title:[row.nome,row.cognome].filter(Boolean).join(' '),onClose,busy:false},
